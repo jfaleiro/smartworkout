@@ -1,6 +1,6 @@
 # smartworkout
 
-**[Analysis](index.html)**
+**[CLICK HERE FOR THE HTML ANALYSIS](https://cdn.rawgit.com/jfaleiro/smartworkout/master/index.html)**
 
 People regularly quantify _*how much*_ of a particular activity they do, but they rarely quantify _*how well*_ that same activity is performed. More often than not discerning the quality of a work out requires specialized supervision of a personal trainer.
 
