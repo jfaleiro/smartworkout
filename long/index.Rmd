@@ -1,0 +1,757 @@
+---
+title: "Smartbells: When Your Dumbbell Outsmarts Your Personal Trainer"
+author: "J Faleiro"
+date: "May 5, 2015"
+output: 
+    html_document:
+        keep_md: true
+        toc: true
+        theme: united
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache.path='.cache/')
+```
+
+# Introduction
+
+People regularly quantify _*how much*_ of a particular activity they do, but they rarely quantify _*how well*_ that same activity is performed. 
+
+This analysis predicts how well people exercise based on data produced by accelarators attached to their belt, forearm, arm, and dumbell. 
+
+The quality in which people exercise is given by the "classe" variable in the training set. The experimentation and previous analysis was performed by the [HAR](http://groupware.les.inf.puc-rio.br/har) laboratory, and was previously detailed in [this paper][1].
+
+On this work we describe alternatives for data analysis based on different techniques for pre-processing, feature selections, and model building.
+
+By the end of analysis we use the best performing model to predict the exercise quality of 20 different cases.
+
+# Pre-Processing
+
+```{r echo=FALSE, message=FALSE}
+if (!require("pacman")) install.packages("pacman")
+```
+
+For this analysis a number of libraries are required. If you intend to replicate this report make sure you use the same list of dependencies:
+
+```{r}
+pacman::p_load(knitr, caret, e1071, mlbench, ggplot2, ISLR, Hmisc, gridExtra, RANN, 
+               AppliedPredictiveModeling, corrplot, randomForest, gbm, splines, parallel,
+               plyr, dplyr, leaps, MASS, pROC, C50)
+```
+
+## Downloading
+
+The first step is downloading the `pml-training.csv` dataset, available at the address:
+
+```{r constants, cache=TRUE}
+url <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+```
+
+Initially we download a sample of the dataset to get a glimpse of the internal structure:
+
+```{r dowload.training, cache=TRUE, dependson='constants, constants.adjustments'}
+temporaryFile <- 'pml-training.csv'
+download.file(url, destfile=temporaryFile, method="curl")
+```
+
+```{r training.raw.initial, cache=TRUE, dependson='constants, download.training'}
+trainingRaw = read.csv(temporaryFile)
+```
+
+```{r}
+dim(trainingRaw)
+```
+
+This is a fairly extensive dataset. There are a number of data points that cannot be processed the way they are, specifically the representation of `NA` values are not regular:
+
+```{r}
+str(trainingRaw$kurtosis_roll_dumbbell)
+str(trainingRaw$kurtosis_yaw_dumbbell)
+```
+
+We define a number of constants to make sure we consider reasonable `NA` values, filter out non-relevant columns for the regression, and set a `shrinkage` factor. This factor is useful mostly to lower processing times during iterations of model development, where it is helpful to work with a partial set of rows.
+
+```{r constants.adjustments, cache=TRUE}
+na.strings <- c('','.','NA','#DIV/0!')
+grepExpr <- paste(c('.*_dumbbell', '.*_arm', '.*_belt', '.*_forearm', 'classe'), collapse='|')
+shrinkage <- 1.0
+```
+
+```{r training.raw, cache=TRUE, dependson='constants, constants.adjustments, download.training'}
+trainingRaw <- read.csv(temporaryFile, na.strings=na.strings)
+```
+
+It has the same dimensions, `na.strings` should not interfere with either the number of columns or rows:
+
+```{r}
+dim(trainingRaw)
+```
+
+And `NA` values are better represented:
+
+```{r}
+str(trainingRaw$kurtosis_roll_dumbbell)
+str(trainingRaw$kurtosis_yaw_dumbbell)
+```
+
+We will shrink the original dataset by a factor, to ease processing times. On the final model, `shrinkage` should be equal to one.
+
+```{r shrink, cache=TRUE, dependson='training.raw'}
+trainingRaw <- trainingRaw[,grep(grepExpr, names(trainingRaw))]
+if (shrinkage < 1.0) {
+    set.seed(123)
+    index <- createDataPartition(trainingRaw$classe, p=shrinkage, list=FALSE)
+    trainingRaw <- trainingRaw[index,]
+}
+```
+
+What should have reduced the number of rows, but not columns.
+
+```{r}
+dim(trainingRaw)
+```
+
+## Filtering Low Variance Features
+
+We decided to take out of the model predictors with a low variance, this is a common technique for situations when we have literally dozens of regressors and using a slow tool like `R`:
+
+```{r nzv, cache=TRUE, dependson='shrink'}
+set.seed(123)
+nzv <- nearZeroVar(trainingRaw)
+trainingNotNzv <- trainingRaw[,-nzv]
+```
+
+We changed the number of columns, but not the number of rows:
+
+```{r}
+dim(trainingRaw)
+dim(trainingNotNzv)
+```
+
+We removed **`r ncol(trainingRaw) - ncol(trainingNotNzv)`** low variace columns from the original dataset, specifically these columns: 
+
+```{r col.diff, cache=TRUE, dependson='nzv'}
+setdiff(colnames(trainingRaw), colnames(trainingNotNzv))
+```
+
+## Imputing Missing Values
+
+Now we will deal with `NA` values on the resulting dataset:
+
+```{r sum.nzv, cache=TRUE, dependson='nzv'}
+sum(is.na(trainingNotNzv))
+```
+
+We have a lot of `NA` values we have to take care of before proceeding on to data analysis, for that we will leverage the troublesome k nearest neighbors mean in `caret` to fill `NA` values:
+
+```{r impute, cache=TRUE, dependson='nzv'}
+pp <- preProcess(trainingNotNzv, method=c('knnImpute'))
+trainingImputed <- predict(pp, trainingNotNzv[,1:ncol(trainingNotNzv)-1])
+trainingImputed$classe <- trainingNotNzv$classe
+```
+
+We did not change dimensions of the data set:
+
+```{r}
+dim(trainingImputed)
+```
+
+But we did change the number of `NA`, what was the intent:
+
+```{r}
+sum(is.na(trainingImputed))
+```
+
+## Partitioning
+
+We create training and testing partitions by leveraging `createDataPartition` in `caret` following a recommended factor of 75/25% respectivelly:
+
+```{r partition, cache=TRUE, dependson='impute'}
+inTraining <- createDataPartition(trainingImputed$classe, p=.75, list=FALSE)
+training <- trainingImputed[inTraining,]
+testing <- trainingImputed[-inTraining,]
+```
+
+```{r}
+dim(training)
+```
+
+```{r}
+dim(testing)
+```
+
+I balanced the alternative of pre-processing done before or after partitioning and decided by the former, mostly for the sake of simplicity. 
+
+This is an interesting consideration that should be better left for separate experimentations.
+
+# Data Analysis
+
+Now we proceed to data analysis _per se_. The analysis is driven mostly by the chosen technique for feature selection. Multiple alternatives are explained in each of the subsequent topics. 
+
+## No Feature Selection
+
+What we call _"no feature selecion"_ is the adoption of a model that does not provide [implicit feature selection][2] in caret.
+
+### Linear Discriminant Analysis
+
+```{r lda.train, cache=TRUE, warning=FALSE, message=FALSE, dependson='partition'}
+set.seed(123)
+fit <- train(classe ~ ., data=training, method='lda', importance=TRUE)
+```
+
+```{r lda.predict, cache=TRUE, warning=FALSE, message=FALSE, dependson='rf.train'}
+set.seed(123)
+ldaPred <- predict(fit, testing)
+```
+
+```{r lda.cm, cache=TRUE, dependson='rf.predict'}
+cm <- confusionMatrix(testing$classe, ldaPred)
+```
+
+```{r}
+cm$overall['Accuracy']
+```
+
+```{r}
+cm$table
+```
+
+```{r}
+importance <- varImp(fit, scale=FALSE)
+```
+
+```{r}
+importance
+plot(importance, top=15)
+```
+
+As expected, the accuracy of models that provide no feature selection for a wide dataset is comparativelly low due to natural overfitting.
+
+## Implicit Feature Selection
+
+Some models in `caret` provide [implicit feature selection][2] automatically. We should expect a better performance of these models.
+
+### Decision Trees
+
+```{r c50tree.train, cache=TRUE, warning=FALSE, message=FALSE, dependson='partition'}
+set.seed(123)
+fit <- train(classe ~ ., data=training, method='C5.0Tree', importance=TRUE, prox=TRUE, allowParallel=TRUE,
+             trControl=trainControl(method='cv', number=3))
+```
+
+```{r c50tree.predict, cache=TRUE, warning=FALSE, message=FALSE, dependson='c50tree.train'}
+set.seed(123)
+c50treePred <- predict(fit, testing)
+```
+
+```{r c50tree.cm, cache=TRUE, dependson='rf.predict'}
+cm <- confusionMatrix(testing$classe, c50treePred)
+```
+
+```{r}
+cm$overall['Accuracy']
+```
+
+```{r}
+cm$table
+```
+
+```{r}
+importance <- varImp(fit, scale=FALSE)
+```
+
+```{r}
+importance
+plot(importance, top=15)
+```
+
+### Random Forests
+
+```{r rf.train, cache=TRUE, warning=FALSE, message=FALSE, dependson='partition'}
+set.seed(123)
+rfFit <- randomForest(classe ~ ., data=training, importance=TRUE)
+```
+
+```{r rf.predict, cache=TRUE, warning=FALSE, message=FALSE, dependson='rf.train'}
+set.seed(123)
+rfPred <- predict(rfFit, testing)
+```
+
+```{r rf.cm, cache=TRUE, dependson='rf.predict'}
+rfCm <- confusionMatrix(testing$classe, rfPred)
+```
+
+```{r}
+rfCm$overall['Accuracy']
+```
+
+```{r}
+rfCm$table
+```
+
+```{r}
+varImpPlot(rfFit, type=2, n.var=15)
+```
+
+### Random Forest (caret)
+
+Random forests wrapped by `caret` using `method='rf` never complete. The wrapper is extremelly opaque and the implementation is unstable. We leave the code here for a reference but we never managed to complete a computation even after 5 hours.
+
+```{r rf2.train, eval=FALSE, cache=TRUE, warning=FALSE, message=FALSE, dependson='partition'}
+set.seed(123)
+fit <- train(classe ~ ., data=training, method='rf', importance=TRUE, prox=TRUE, allowParallel=TRUE,
+             trControl=trainControl(method='cv', number=2))
+```
+
+```{r rf2.predict, eval=FALSE, cache=TRUE, warning=FALSE, message=FALSE, dependson='rf2.train'}
+set.seed(123)
+pred <- predict(fit, testing)
+```
+
+```{r rf2.cm, eval=FALSE, cache=TRUE, dependson='rf2.predict'}
+cm <- confusionMatrix(testing$classe, pred)
+```
+
+## Feature Selection by Correlation Threshold
+
+A different way to select features is to remove highly correlated features and apply a model on the resulting set of predictors. Despite the simplicity, the performance of this technique was surprisingly high.
+
+We need a function to perform fittings for different levels of threshold:
+
+```{r correlation.threshold, cache=TRUE}
+correlationThreshold <- function(dfTraining, dfTesting, threshold, method='lda') {
+    dfTrainingNumeric <- dfTraining[,1:ncol(dfTraining)-1]
+    dfCorr <- cor(dfTrainingNumeric)
+    if (threshold < 1.0) {
+        highlyCorrColumns <- findCorrelation(dfCorr, threshold)
+        dfFiltered <- dfTrainingNumeric[,-highlyCorrColumns]
+    } else {
+        dfFiltered <- dfTrainingNumeric
+    }
+    dfFilteredCorr <- cor(dfFiltered)
+    dfFiltered$classe <- dfTraining$classe
+    mod <- randomForest(classe ~ ., data=dfFiltered)
+    pred <- predict(mod, dfTesting)
+    cm <- confusionMatrix(dfTesting$classe, pred)
+    list(corr=dfFilteredCorr, cm=cm)
+}
+```
+
+How does the 1.0 correlation threshold, , i.e. all features, look like?
+
+```{r corplot.1.0, cache=TRUE, warning=FALSE, dependson='partition,correlation.threshold'}
+ct10 <- correlationThreshold(training, testing, 1.0)
+```
+
+```{r}
+corrplot(ct10$corr, order='hclust', tl.pos='n')
+```
+
+Where the overall accuracy is:
+
+```{r}
+ct10$cm$overall['Accuracy']
+```
+
+In theory, running a model against a heatmap that is mostly blank will perform better, like this one:
+
+```{r corplot.lower, cache=TRUE, warning=FALSE, dependson='partition,correlation.threshold'}
+ctLower <- correlationThreshold(training, testing, 0.2)
+```
+
+```{r}
+corrplot(ctLower$corr, order='hclust', method='number', tl.pos='n')
+```
+
+And the overall accuracy is:
+
+```{r}
+ctLower$cm$overall['Accuracy']
+```
+
+What is lower than the accuracy of the same model when no threshold filtering. 
+
+Let's check how accuracies compare based on a varying threshold:
+
+```{r accuracies, cache=TRUE, warning=FALSE, message=FALSE, dependson='partition,correlation.threshold'}
+thresholds <- seq(0.1, 0.9, by=0.1)
+set.seed(123)
+correlations <- lapply(thresholds, function(threshold) {
+    correlationThreshold(training, testing, threshold)
+})
+```
+
+```{r}
+d <- data.frame(threshold=thresholds, 
+                accuracy=sapply(correlations, function(x) {x$cm$overall['Accuracy']}),
+                kappa=sapply(correlations, function(x) {x$cm$overall['Kappa']}))
+ggplot(d, aes(x=threshold,y=accuracy,col=kappa)) +
+    geom_point()
+```
+
+We can see that accuracies increase to a point, and then we see the effects of overfitting bringing accuracies down.
+
+The highest accuracy with this method is given by:
+
+```{r}
+max(sapply(correlations, function(x) {x$cm$overall['Accuracy']}))
+```
+
+## Automatic Feature Selection
+
+We will base our automatic feature selection on `leaps`, the wrappers on `caret` never completed and/or provided opaque error messages, would take too much time to investigate the cause.
+
+We need a function to extract best variables at level `nv` based on regression `reg`:
+
+```{r}
+featureSearchColumns <- function(reg, nv) {
+    df <- as.data.frame(reg$outmat)
+    df <- as.data.frame(t(df))
+    colnames(df) <- sapply(1:ncol(df), function(c) {paste('v',c,sep='')})
+    var <- paste('v', nv, sep='')
+    columns <- rownames(df[df[var] == '*',])
+    columns
+}
+```
+
+We will only try sequential methods.
+
+### Backward Selection
+
+We start with a full set, and go backwards removing features, keeping track of error on each iteration:
+
+```{r leaps.backwards, cache=TRUE, warning=FALSE, dependson='partition'}
+regBackwards <- regsubsets(classe ~ ., data=training, nvmax=50, method='backward')
+```
+
+```{r}
+b.sum <- summary(regBackwards)
+plot(b.sum$bic, type='l', xlab='# features', ylab='bic', main='BIC score by feature inclusion')
+```
+
+We can see BIC score is lower nearby 27 features, so let's retrieve the features related to that point:
+
+```{r}
+columns <- featureSearchColumns(b.sum, 27)
+columns
+```
+
+```{r fit.backward, cache=TRUE, dependson='leaps.backwards'}
+set.seed(123)
+fitBackward <- randomForest(training$classe ~ ., data=training[,columns])
+```
+
+```{r predict.backward, cache=TRUE, warning=FALSE, message=FALSE, dependson='fit.backward'}
+set.seed(123)
+predBackward <- predict(fitBackward, testing)
+```
+
+```{r cm.backward, cache=TRUE, dependson='predict.backward'}
+cmBw <- confusionMatrix(testing$classe, predBackward)
+```
+
+```{r}
+cmBw$overall['Accuracy']
+```
+
+```{r}
+cmBw$table
+```
+
+```{r}
+varImpPlot(fitBackward, type=2, n.var=15)
+```
+
+### Forward Selection
+
+We start with an empty set, and go forward adding features, keeping track of error on each iteration:
+
+```{r leaps.forward, cache=TRUE, warning=FALSE, dependson='partition'}
+regForward <- regsubsets(classe ~ ., data=training, nvmax=50, method='forward')
+```
+
+```{r}
+b.sum <- summary(regForward)
+plot(b.sum$bic, type='l', xlab='# features', ylab='bic', main='BIC score by feature inclusion')
+```
+
+We can see BIC score is lower nearby 33 features, so let's retrieve the features related to that point:
+
+```{r}
+columns <- featureSearchColumns(b.sum, 33)
+columns
+```
+
+```{r fit.forward, cache=TRUE, dependson='leaps.forward'}
+set.seed(123)
+fitForward <- randomForest(training$classe ~ ., data=training[,columns])
+```
+
+```{r predict.forward, cache=TRUE, warning=FALSE, message=FALSE, dependson='fit.backward'}
+set.seed(123)
+predForward <- predict(fitForward, testing)
+```
+
+```{r cm.forward, cache=TRUE, dependson='rf2.predict'}
+cmFw <- confusionMatrix(testing$classe, predForward)
+```
+
+```{r}
+cmFw
+```
+
+```{r}
+cmFw$overall['Accuracy']
+```
+
+```{r}
+cmFw$table
+```
+
+```{r}
+varImpPlot(fitForward, type=2, n.var=15)
+```
+
+## Stacked Models
+
+Stacked models are a fitting done on top of previous fittings, with the hope that the stacked model provides a smaller error.
+
+```{r stacked.fit, cache=TRUE, dependson='c50tree.predict,rf.predict,lda.predict'}
+stackedDf <- data.frame(c50treePred, rfPred, ldaPred, classe=testing$classe)
+stackedFit <- train(classe ~ ., method='lda', data=stackedDf)
+```
+
+```{r stacked.predict, cache=TRUE, dependson='stacked.fit'}
+stackedPred = predict(stackedFit, testing)
+```
+
+```{r stacked.cm, cache=TRUE, dependson='stacked.predict'}
+cm <- confusionMatrix(testing$classe, stackedPred)
+```
+
+```{r}
+cm$overall['Accuracy']
+```
+
+```{r}
+cm$table
+```
+
+```{r}
+importance <- varImp(fit, scale=FALSE)
+```
+
+```{r}
+importance
+plot(importance, top=15)
+```
+
+# Predicting Raw Test Dataset
+
+```{r download.testing.initial, cache=TRUE, dependson='constants.adjustment'}
+urlTesting <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+temporaryFile <- 'pml-testing.csv'
+download.file(urlTesting, destfile=temporaryFile, method="curl")
+testingRaw <- read.csv(temporaryFile, na.strings=na.strings) 
+```
+
+```{r}
+dim(testing)
+dim(testingRaw)
+```
+
+```{r}
+dim(testingRaw)
+```
+
+```{r}
+setdiff(colnames(testing), colnames(testingRaw))
+```
+
+```{r}
+setdiff(colnames(testingRaw), colnames(testing))
+```
+
+## No Pre-Processing
+
+We will use Random Forests, with an expected prediction rate of:
+
+```{r}
+rfCm$overall['Accuracy']
+```
+
+All predicted values are `NA`:
+
+```{r}
+noPreProcessingPred <- predict(rfFit, testingRaw)
+```
+
+```{r}
+testingSubset <- testingRaw[,intersect(colnames(testing), colnames(testingRaw))]
+#testingSubset <- testingSubset[,colSums(is.na(testingSubset)) < nrow(testingSubset)]
+```
+
+A few parameters from training set
+
+```{r}
+trainingSubset <- training[,intersect(colnames(training), colnames(testingSubset))]
+```
+
+```{r}
+sum(is.na(trainingSubset))
+mean(trainingSubset[!is.na(trainingSubset)])
+sd(trainingSubset[!is.na(trainingSubset)])
+```
+
+## Standardizing
+
+```{r}
+testingSubset <- testingRaw[,intersect(colnames(testing), colnames(testingRaw))]
+#testingSubset <- testingSubset[,colSums(is.na(testingSubset)) < nrow(testingSubset)]
+```
+
+```{r}
+sum(is.na(testingSubset))
+mean(testingSubset[!is.na(testingSubset)])
+```
+
+```{r}
+for (c in colnames(testingSubset)) {
+    testingSubset[is.na(testingSubset[,c]),c] <- mean(training[,c])
+    testingSubset[,c] <- (testingSubset[,c] - mean(training[,c])) / sd(training[,c])
+}
+```
+
+```{r}
+sum(is.na(testingSubset))
+mean(testingSubset[!is.na(testingSubset)])
+sd(testingSubset[!is.na(testingSubset)])
+```
+
+
+```{r}
+standardizedPred <- predict(rfFit, testingSubset)
+```
+
+## KNN Imputing Based on Training Points, Forward Fitting Model
+
+```{r}
+testingSubset <- testingRaw[,intersect(colnames(testing), colnames(testingRaw))]
+```
+
+```{r}
+sum(is.na(testingSubset))
+mean(testingSubset[!is.na(testingSubset)])
+```
+
+```{r}
+for (c in colnames(testingSubset)) {
+    testingSubset[is.na(testingSubset[,c]),c] <- mean(training[,c])
+}
+```
+
+```{r}
+pp <- preProcess(training, method=c('knnImpute'))
+testingSubset <- predict(pp, testingSubset)
+```
+
+```{r}
+sum(is.na(testingSubset))
+mean(testingSubset[!is.na(testingSubset)])
+sd(testingSubset[!is.na(testingSubset)])
+```
+
+```{r}
+knnOnTrainingFitForwardPred <- predict(fitForward, testingSubset)
+```
+
+## KNN Imputing Based on Testing Points
+
+
+## KNN Imputing Based on Training Points
+
+```{r}
+testingSubset <- testingRaw[,intersect(colnames(testing), colnames(testingRaw))]
+```
+
+```{r}
+sum(is.na(testingSubset))
+mean(testingSubset[!is.na(testingSubset)])
+```
+
+```{r}
+for (c in colnames(testingSubset)) {
+    testingSubset[is.na(testingSubset[,c]),c] <- mean(training[,c])
+}
+```
+
+```{r}
+pp <- preProcess(training, method=c('knnImpute'))
+testingSubset <- predict(pp, testingSubset)
+```
+
+```{r}
+sum(is.na(testingSubset))
+mean(testingSubset[!is.na(testingSubset)])
+sd(testingSubset[!is.na(testingSubset)])
+```
+
+```{r}
+knnOnTrainingPred <- predict(rfFit, testingSubset)
+```
+
+## KNN Imputing Based on Testing Points
+
+```{r}
+testingSubset <- testingRaw[,intersect(colnames(testing), colnames(testingRaw))]
+```
+
+```{r}
+sum(is.na(testingSubset))
+mean(testingSubset[!is.na(testingSubset)])
+```
+
+```{r}
+for (c in colnames(testingSubset)) {
+    testingSubset[is.na(testingSubset[,c]),c] <- mean(training[,c])
+}
+```
+
+```{r warning=FALSE}
+pp <- preProcess(testingSubset, method=c('knnImpute'))
+testingSubset <- predict(pp, testingSubset)
+```
+
+```{r}
+sum(is.na(testingSubset))
+mean(testingSubset[!is.na(testingSubset)])
+sd(testingSubset[!is.na(testingSubset)])
+```
+
+```{r}
+knnOnTestingPred <- predict(rfFit, testingSubset)
+```
+
+# Final Observations
+
+```{r echo=FALSE}
+df <- data.frame(no.pre.processing=noPreProcessingPred,
+                 standardized=standardizedPred,
+                 knn.on.training.fwd=knnOnTrainingFitForwardPred,
+                 knn.on.training=knnOnTrainingPred,
+                 knn.on.testing=knnOnTestingPred)
+write.csv(df, paste('quiz',Sys.time(),'.csv',sep=''))
+```
+
+The idea behind `caret` is cool, but at this point it seems it has a long way to go to a full blown ME library. There is plenty of documentation but it is mostly short and examples cannot be readily reproduced. Runtime support could be better, error messages are opaque and to little help. You have to constant rely on google searches that are often to no end and a time sink.
+
+Most of the algorithms could not be used on a reasonably large dataset like this one. I had to use the underlying API most of the times.
+
+# References
+
+We used a number of references for this analysis, specifically:
+
+* [1] "Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6."
+
+[1]: http://groupware.les.inf.puc-rio.br/public/papers/2012.Ugulino.WearableComputing.HAR.Classifier.RIBBON.pdf 
+[2]: http://topepo.github.io/caret/Implicit_Feature_Selection.html

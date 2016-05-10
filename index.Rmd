@@ -1,0 +1,278 @@
+---
+title: "Smartbells: When Your Dumbbell Outsmarts Your Personal Trainer"
+author: "J Faleiro"
+date: "May 5, 2016"
+output: 
+    html_document:
+        keep_md: true
+        toc: true
+        theme: united
+---
+
+```{r echo=FALSE, message=FALSE}
+if (!require("pacman")) install.packages("pacman")
+```
+
+# Introduction
+
+People regularly quantify _*how much*_ of a particular activity they do, but they rarely quantify _*how well*_ that same activity is performed. More often than not discerning the quality of a work out requires specialized supervision of a personal trainer.
+
+Have you ever imagined a scenario in which your training equipment would play the role of your personal trainer?
+
+This is actually what this whole analysis is all about. We predict how well people exercise based on data produced by accelarators attached to their belt, forearm, arm, and dumbell. 
+
+The overall quality in which people exercise is given by the "classe" variable in the training set. Classe 'A' indicates an exercise perfomed correctly (all kudos to you, athlete). The other classes indicate common exercizing mistakes.
+
+All credits for data collection and original analysis go to the [Human Activity Recognition - HAR](http://groupware.les.inf.puc-rio.br/har) laboratory, previously detailed in [this paper][1]. Credits for educational notes go to the [Johns Hopkins School of Biostatistics](http://www.jhsph.edu/departments/biostatistics/).
+
+# Pre-Processing
+
+For this analysis a number of libraries are required. If you intend to replicate this report make sure you use the same list of dependencies:
+
+```{r}
+pacman::p_load(knitr, caret, e1071, mlbench, ggplot2, ISLR, Hmisc, gridExtra, RANN, 
+               AppliedPredictiveModeling, corrplot, randomForest, gbm, splines, parallel,
+               plyr, dplyr, leaps, MASS, pROC, C50,
+               # parallel support
+               doMC)
+```
+
+## Obtaining the Data
+
+The first step is downloading the data required for this exercise. The training and check data sets are available respectively at `url` and `urlTesting` locations:
+
+```{r constants, cache=TRUE}
+url <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+file <- 'pml-training.csv'
+urlTesting <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+testingFile <- 'pml-testing.csv'
+```
+
+```{r download.testing, cache=TRUE, dependson='constants.adjustment'}
+download.file(urlTesting, destfile=testingFile, method="curl")
+```
+
+```{r dowload.training, cache=TRUE, dependson='constants, constants.adjustments'}
+download.file(url, destfile=file, method="curl")
+```
+
+## Data Clean Up
+
+From initial visual inspection we identified a few issues we will have to address at the time we will read them.
+
+* In some cases empty values are described by constants `NA`, some other times by empty strings and some other times by random strings like "#DIV/0!". The vetor `na.strings` represents all values in the dataset that should be treated as `NA`.
+* Most columns are not relevant to this regression exercise. Some examples are the name of the user performing the exercise, timestamp or window number. The columns we are interested in are represented as regular expressions in `grepExpr`.
+* This a large dataset. We set a `shrinkage` factor to artificially reduce the dataframe and lower the processing times during iterations of model development. On the final version, shrinkage should be set to `1.0`.
+
+```{r constants.adjustments, cache=TRUE}
+na.strings <- c('','.','NA','#DIV/0!')
+grepExpr <- paste(c('.*_dumbbell', '.*_arm', '.*_belt', '.*_forearm', 'classe'), collapse='|')
+shrinkage <- 1.0
+```
+
+## Raw Feature Selection
+
+We only load columns from testing in `testingRaw` if all these conditions are true:
+
+* At least one value is not `NA`
+* A column name must match the regular expression in `na.strings`
+
+```{r testing.raw, cache=TRUE}
+testingRaw <- read.csv(testingFile, na.strings=na.strings) 
+testingRaw <- testingRaw[, colSums(is.na(testingRaw)) != nrow(testingRaw)] # at least one value != NA
+testingRaw <- testingRaw[,grep(grepExpr, names(testingRaw))]
+```
+
+We only load a training column from `trainingRaw` if the column is also defined in testing data set and loaded in `testingRaw`:
+
+```{r training.raw, cache=TRUE, dependson='constants, constants.adjustments, download.training'}
+trainingRaw <- read.csv(file, na.strings=na.strings)
+trainingRaw <- trainingRaw[,c(colnames(testingRaw), 'classe')]
+if (shrinkage < 1.0) {
+    set.seed(123)
+    index <- createDataPartition(trainingRaw$classe, p=shrinkage, list=FALSE)
+    trainingRaw <- trainingRaw[index,]
+}
+```
+
+## Data Partitioning
+
+The data is partitioned into a **75/25%** split between training and testing for training, cross-validation and in/out sample testing using the method `createDataPartition` from `caret`:
+
+```{r partition, cache=TRUE, dependson='training.raw'}
+set.seed(123)
+inTraining <- createDataPartition(trainingRaw$classe, p=.75, list=FALSE)
+training <- trainingRaw[inTraining,]
+dim(training)
+testing <- trainingRaw[-inTraining,]
+dim(testing)
+```
+
+## Data Imputation
+
+We replace `NA` values by the average of K nearest neighbors of that missing value. The K nearest neighbors imputation algorithm is applied only on numerical columns of the training set. We use the `caret` function `preProcess` with `method='knnImpute'`:
+
+```{r impute.training, cache=TRUE, dependson='partition'}
+numerical <- training[, sapply(training, is.numeric)]
+set.seed(123)
+pp <- preProcess(numerical, method=c('knnImpute'))
+trainingImputed <- predict(pp, numerical)
+trainingImputed$classe <- training$classe
+```
+
+# Model Fitting
+
+## Feature Selection
+
+We opted to use an explicit feature selection model, random forest, in which feature selection is performed through cross validation.
+
+## Training
+
+We train our model random forests model, `method='rf'`, over 7-folds cross validation (`method='cv'` in `trainControl`) using parallel processsing whenever available:
+
+```{r fit.forward, cache=TRUE, dependson='impute.training'}
+registerDoMC(5) # parallel support
+set.seed(123)
+fitForward <- train(classe ~ ., data=trainingImputed, method='rf',
+                    trControl=trainControl(method='cv',
+                                           number=7, 
+                                           allowParallel=TRUE
+                                           )
+                    )
+```
+
+## Feature Importance
+
+Despite of the absence of automatic feature selection, the random forest classification algorith does keep track of a ranking of how well each feature collaborate to the outcome on each class. We call this ranking `importance`, retrieved through the method `varImp` in `caret`.
+
+```{r}
+importance <- varImp(fitForward)
+```
+
+The cross correlation of the top 4 features is given in a feature plot. 
+
+```{r}
+transparentTheme(trans = .3)
+featurePlot(x=trainingImputed[,rownames(head(importance$importance,4))],
+            y=trainingImputed$classe,
+            plot='pairs',
+            auto.key=list(columns=5)
+            )
+```
+
+We can visually detect a number of clusters for each of the classes A, B, C, D and E, as well as several clear linear relationships - a clear hint that this model should perform well.
+
+Specifically the 15 top features on this model...
+
+```{r}
+head(importance$importance, 15)
+```
+
+...proportionally stacked visually:
+
+```{r}
+plot(importance, top=20)
+```
+
+# Prediction and In/Out Sample Error Measurements
+
+We will measure and track in and out sample error by means of comparison of a confusion matrix against the training partition and a testing partition cented and scaled around metrics of the training partition.
+
+```{r echo=FALSE}
+errorOf <- function(cm) {
+    accuracy <- cm$overall['Accuracy']
+    1.0 - accuracy
+}
+```
+
+## In-Sample Error
+
+We will use the definition that in-sample error is the diffence between your prediction and actuals for _data points used to build the model_.
+
+We should expect the in-sample error to be 0%, equivalent to 100% accuracy, what indicates the bias of the in-sample error measurement:
+
+```{r, warning=FALSE, message=FALSE}
+isPred <- predict(fitForward, trainingImputed)
+```
+
+```{r}
+cm <- confusionMatrix(trainingImputed$classe, isPred)
+cm$table
+```
+
+As expected, no misses. In-sample error matches the theoretical expectation of **`r round(errorOf(cm)*100, 2)`%**.
+
+## Out-Sample Error
+
+For the out-sample errors, since the KNN imputation scales and centers the training data set, we need to center the measurements on the testing set around the mean on the training partition, and scale to the standard deviation of the same training partition This is performed by the function `centerOnReference`.
+
+```{r echo=FALSE}
+centerOnReference <- function(df, reference) {
+    for (c in colnames(df)) {
+        df[,c] <- (df[,c] - mean(reference[,c])) / sd(reference[,c])
+    }
+    df
+}
+```
+
+```{r impute.testing, cache=TRUE, dependson='partition'}
+numericalTesting <- testing[, sapply(testing, is.numeric)]
+testingImputed <- centerOnReference(numericalTesting, training)
+testingImputed$classe <- testing$classe 
+```
+
+```{r warning=FALSE, message=FALSE}
+osPred <- predict(fitForward, testingImputed)
+```
+
+```{r}
+cm <- confusionMatrix(testing$classe, osPred)
+cm$table
+```
+
+For this model, for an accuracy of **`r round(cm$overall['Accuracy']*100, 2)`%** the out-sample error is **`r round(errorOf(cm)*100, 2)`%**, with a confidence interval of **`r round(cm$overall['AccuracyLower']*100, 2)`%** to **`r round(cm$overall['AccuracyUpper']*100, 2)`%**. 
+
+The complete confusion matrix is given by:
+
+```{r echo=FALSE}
+cm
+```
+
+
+# Final Notes
+
+In a simple and quick fitting we were able to get very close to the weighted average of the [baseline accuracy][1] of **99.4%**. Despite of the numerical proximity of the results, we can see the baseline is on the upper boundary of the confidence interval of this study:
+
+```{r echo=FALSE}
+round(cm$overall['AccuracyUpper']*100, 2)
+```
+
+We were limited in terms of computing resources and time (this analysis was performed beginning to end in about 3 hours). If we had more time we could try ensemble methods for classifications, specifically `AdaBoost`, but that would be beyond the intent and time allocated for this exercise.
+
+If you want to check a more elaborate analysis you can either check the [original paper][1] or refer to  a [longer version of this study][3], where we list several techniques and options for investigation over the same raw data.
+
+```{r echo=FALSE}
+numericalTest <- testingRaw[, sapply(testingRaw, is.numeric)]
+numericalTest <- centerOnReference(numericalTest, training)
+```
+
+```{r echo=FALSE}
+df <- data.frame(prediction=predict(fitForward, numericalTest))
+write.csv(df, paste('quiz',Sys.time(),'.csv',sep=''))
+```
+
+# References
+
+* [[1]] "Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6."
+* [[2]] "Implicit Feature Selection Models in Caret"
+* [[3]] "Smartbells: When Your Dumbbell Outsmarts Your Personal Trainer"
+
+[1]: http://groupware.les.inf.puc-rio.br/public/papers/2012.Ugulino.WearableComputing.HAR.Classifier.RIBBON.pdf 
+[2]: http://topepo.github.io/caret/Implicit_Feature_Selection.html
+[3]: http://rpubs.com/jfaleiro/smartbells
+
+**Session Configuration Details** (reproducibility of this analysis)
+
+```{r}
+sessionInfo()
+```
