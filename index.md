@@ -139,28 +139,23 @@ We opted to use an explicit feature selection model, random forest, in which fea
 
 ## Training
 
-We train our model random forests model, `method='rf'`, over 10-folds cross validation (`method='cv'` in `trainControl`) using parallel processsing whenever available:
+We train our model random forests model, `method='rf'`, over 6-folds cross validation (`method='cv'` in `trainControl`) using parallel processsing whenever available:
 
 
 ```r
-registerDoMC(5) # parallel support
+registerDoMC(6) # parallel support
 set.seed(123)
 fitForward <- train(classe ~ ., data=trainingImputed, method='rf',
                     trControl=trainControl(method='cv',
-                                           number=10, 
+                                           number=6, 
                                            allowParallel=TRUE
                                            )
                     )
 ```
 
-```
-## Warning in nominalTrainWorkflow(x = x, y = y, wts = weights, info =
-## trainInfo, : There were missing values in resampled performance measures.
-```
-
 ## Feature Importance
 
-Despite of the absence of automatic feature selection, the random forest classification algorith does keep track of a ranking of how well each feature collaborate to the outcome on each class. We call this ranking `importance`, retrieved through the method `varImp` in `caret`.
+Despite of the absence of automatic feature selection, the random forest classification algorithm does keep track of a ranking of how well each feature collaborate to the outcome on each class. We call this ranking `importance`, retrieved through the method `varImp` in `caret`.
 
 
 ```r
@@ -191,22 +186,22 @@ head(importance$importance, 15)
 ```
 
 ```
-##                    Overall
-## roll_belt        78.751598
-## pitch_belt       45.587833
-## yaw_belt         94.491642
-## total_accel_belt  0.000000
-## gyros_belt_x      2.645488
-## gyros_belt_y      3.678615
-## gyros_belt_z     14.604090
-## accel_belt_x      2.675444
-## accel_belt_y      1.362189
-## accel_belt_z      6.683593
-## magnet_belt_x    13.218572
-## magnet_belt_y    20.331974
-## magnet_belt_z    25.772749
-## roll_arm         33.353632
-## pitch_arm         8.114117
+##                     Overall
+## roll_belt        100.000000
+## pitch_belt        61.054130
+## yaw_belt          79.056338
+## total_accel_belt  23.793061
+## gyros_belt_x       6.927417
+## gyros_belt_y       7.151216
+## gyros_belt_z      32.320001
+## accel_belt_x      10.707923
+## accel_belt_y      10.639753
+## accel_belt_z      44.004848
+## magnet_belt_x     24.084942
+## magnet_belt_y     43.564740
+## magnet_belt_z     43.070473
+## roll_arm          33.679146
+## pitch_arm         17.851406
 ```
 
 ...proportionally stacked visually:
@@ -246,12 +241,12 @@ cm$table
 ## Prediction    A    B    C    D    E
 ##          A 4185    0    0    0    0
 ##          B    0 2848    0    0    0
-##          C    0 1024 1543    0    0
+##          C    0    0 2567    0    0
 ##          D    0    0    0 2412    0
-##          E    0    0    0 2048  658
+##          E    0    0    0    0 2706
 ```
 
-As expected, no misses. In-sample error matches the theoretical expectation of **20.87%**.
+As expected, no misses. In-sample error matches the theoretical expectation of **0%**.
 
 ## Out-Sample Error
 
@@ -281,13 +276,13 @@ cm$table
 ##           Reference
 ## Prediction    A    B    C    D    E
 ##          A 1394    1    0    0    0
-##          B    4  945    0    0    0
-##          C    0  371  478    6    0
-##          D    0    3    5  796    0
-##          E    0    0    0  714  187
+##          B    2  945    2    0    0
+##          C    0    8  846    1    0
+##          D    0    0   19  783    2
+##          E    0    0    0    1  900
 ```
 
-For this model, for an accuracy of **77.49%** the out-sample error is **22.51%**, with a confidence interval of **76.29%** to **78.65%**. 
+For this model, for an accuracy of **99.27%** the out-sample error is **0.73%**, with a confidence interval of **98.99%** to **99.49%**. 
 
 The complete confusion matrix is given by:
 
@@ -298,32 +293,32 @@ The complete confusion matrix is given by:
 ##           Reference
 ## Prediction    A    B    C    D    E
 ##          A 1394    1    0    0    0
-##          B    4  945    0    0    0
-##          C    0  371  478    6    0
-##          D    0    3    5  796    0
-##          E    0    0    0  714  187
+##          B    2  945    2    0    0
+##          C    0    8  846    1    0
+##          D    0    0   19  783    2
+##          E    0    0    0    1  900
 ## 
 ## Overall Statistics
 ##                                           
-##                Accuracy : 0.7749          
-##                  95% CI : (0.7629, 0.7865)
-##     No Information Rate : 0.3091          
+##                Accuracy : 0.9927          
+##                  95% CI : (0.9899, 0.9949)
+##     No Information Rate : 0.2847          
 ##     P-Value [Acc > NIR] : < 2.2e-16       
 ##                                           
-##                   Kappa : 0.7157          
+##                   Kappa : 0.9907          
 ##  Mcnemar's Test P-Value : NA              
 ## 
 ## Statistics by Class:
 ## 
 ##                      Class: A Class: B Class: C Class: D Class: E
-## Sensitivity            0.9971   0.7159  0.98965   0.5251  1.00000
-## Specificity            0.9997   0.9989  0.91473   0.9976  0.84863
-## Pos Pred Value         0.9993   0.9958  0.55906   0.9900  0.20755
-## Neg Pred Value         0.9989   0.9052  0.99877   0.8244  1.00000
-## Prevalence             0.2851   0.2692  0.09849   0.3091  0.03813
-## Detection Rate         0.2843   0.1927  0.09747   0.1623  0.03813
-## Detection Prevalence   0.2845   0.1935  0.17435   0.1639  0.18373
-## Balanced Accuracy      0.9984   0.8574  0.95219   0.7614  0.92432
+## Sensitivity            0.9986   0.9906   0.9758   0.9975   0.9978
+## Specificity            0.9997   0.9990   0.9978   0.9949   0.9998
+## Pos Pred Value         0.9993   0.9958   0.9895   0.9739   0.9989
+## Neg Pred Value         0.9994   0.9977   0.9948   0.9995   0.9995
+## Prevalence             0.2847   0.1945   0.1768   0.1601   0.1839
+## Detection Rate         0.2843   0.1927   0.1725   0.1597   0.1835
+## Detection Prevalence   0.2845   0.1935   0.1743   0.1639   0.1837
+## Balanced Accuracy      0.9991   0.9948   0.9868   0.9962   0.9988
 ```
 
 
@@ -334,7 +329,7 @@ In a simple and quick fitting we were able to get very close to the weighted ave
 
 ```
 ## AccuracyUpper 
-##         78.65
+##         99.49
 ```
 
 We were limited in terms of computing resources and time (this analysis was performed beginning to end in about 3 hours). If we had more time we could try ensemble methods for classifications, specifically `AdaBoost`, but that would be beyond the intent and time allocated for this exercise.

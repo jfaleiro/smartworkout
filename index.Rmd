@@ -128,14 +128,14 @@ We opted to use an explicit feature selection model, random forest, in which fea
 
 ## Training
 
-We train our model random forests model, `method='rf'`, over 7-folds cross validation (`method='cv'` in `trainControl`) using parallel processsing whenever available:
+We train our model random forests model, `method='rf'`, over 6-folds cross validation (`method='cv'` in `trainControl`) using parallel processsing whenever available:
 
 ```{r fit.forward, cache=TRUE, dependson='impute.training'}
-registerDoMC(5) # parallel support
+registerDoMC(6) # parallel support
 set.seed(123)
 fitForward <- train(classe ~ ., data=trainingImputed, method='rf',
                     trControl=trainControl(method='cv',
-                                           number=7, 
+                                           number=6, 
                                            allowParallel=TRUE
                                            )
                     )
@@ -143,7 +143,7 @@ fitForward <- train(classe ~ ., data=trainingImputed, method='rf',
 
 ## Feature Importance
 
-Despite of the absence of automatic feature selection, the random forest classification algorith does keep track of a ranking of how well each feature collaborate to the outcome on each class. We call this ranking `importance`, retrieved through the method `varImp` in `caret`.
+Despite of the absence of automatic feature selection, the random forest classification algorithm does keep track of a ranking of how well each feature collaborate to the outcome on each class. We call this ranking `importance`, retrieved through the method `varImp` in `caret`.
 
 ```{r}
 importance <- varImp(fitForward)
